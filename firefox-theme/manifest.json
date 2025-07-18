@@ -1,0 +1,28 @@
+{
+    "manifest_version": 3,
+    "version": "1.0",
+    "name": "Black Theme with Animation",
+    "theme": {
+      "images": {
+        "theme_frame": "images/header.png",
+        "additional_backgrounds": ["images/animated.gif"]
+      },
+      "properties": {
+        "additional_backgrounds_alignment": ["right center"],
+        "additional_backgrounds_tiling": ["no-repeat"]
+      },
+      "colors": {
+        "frame": [0, 0, 0],
+        "frame_inactive": [20, 20, 20],
+        "tab_background_text": [255, 255, 255],
+        "toolbar": [0, 0, 0],
+        "toolbar_text": [255, 255, 255],
+        "toolbar_field": [20, 20, 20],
+        "toolbar_field_text": [255, 255, 255],
+        "tab_line": [255, 255, 255],
+        "popup": [0, 0, 0],
+        "popup_text": [255, 255, 255]
+      }
+    }
+  }
+  
