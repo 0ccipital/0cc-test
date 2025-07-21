@@ -40,19 +40,27 @@ class ConversationTree:
         return len(self._states)
     
     def add_state(self, parent_id: Optional[str], message: str, response: str, model: str) -> ConversationState:
-        """Add new state to tree with proper indexing."""
+        """Add new state to tree with improved ID generation."""
         self._sequence_counter += 1
         
-        # Generate hierarchical ID
+        # Generate hierarchical ID with smarter branching logic
         if parent_id is None:
+            # Root state
             hierarchical_id = str(self._sequence_counter)
         else:
             if parent_id not in self._states:
                 raise StateNotFoundError(parent_id)
             
-            # Count existing children to determine branch index
-            children_count = len(self._parent_children[parent_id])
-            hierarchical_id = f"{parent_id}.{children_count + 1}"
+            # Check if parent already has children
+            existing_children = self._parent_children.get(parent_id, [])
+            
+            if len(existing_children) == 0:
+                # First child - continue the linear path (no new level)
+                hierarchical_id = str(self._sequence_counter)
+            else:
+                # Second+ child - this creates a branch, so add new level
+                branch_number = len(existing_children) + 1
+                hierarchical_id = f"{parent_id}.{branch_number}"
         
         # Create new state
         state = ConversationState(
@@ -63,6 +71,26 @@ class ConversationTree:
             response=response,
             model=model,
             timestamp=datetime.now()
+        )
+        
+        # Determine if this creates a branch
+        is_branch = False
+        if parent_id and parent_id in self._states:
+            existing_children = self._parent_children.get(parent_id, [])
+            if len(existing_children) > 0:
+                is_branch = True
+        
+        # Update state with branch info
+        state = ConversationState(
+            hierarchical_id=hierarchical_id,
+            sequence_id=self._sequence_counter,
+            parent_id=parent_id,
+            message=message,
+            response=response,
+            model=model,
+            timestamp=datetime.now(),
+            tags=frozenset(),
+            metadata={'is_branch': is_branch}
         )
         
         # Update all indexes

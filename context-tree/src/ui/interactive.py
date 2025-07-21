@@ -105,7 +105,10 @@ class InteractiveSelector:
     
     def _format_state_preview(self, state: ConversationState) -> str:
         """Format state for preview display."""
+        # Truncate message to reasonable length
         message_preview = state.message[:40] + "..." if len(state.message) > 40 else state.message
+        
+        # Truncate response to reasonable length  
         response_preview = state.response[:40] + "..." if len(state.response) > 40 else state.response
         
         tags_display = ""
@@ -194,14 +197,21 @@ class InteractiveTreeBrowser:
         # Display tree with current selection highlighted
         self._render_tree_with_highlight()
         
-        # Show current state details
+        # Show current state details with truncation
         if self.current_view_state:
             current_state = self.tree.find_state(self.current_view_state)
             if current_state:
                 print("\n" + "─" * 60)
                 print(f"Selected: {current_state.display_name}")
-                print(f"Message: {current_state.message}")
-                print(f"Response: {current_state.response[:100]}...")
+                
+                # Truncate message display
+                message_display = current_state.message[:80] + "..." if len(current_state.message) > 80 else current_state.message
+                print(f"Message: {message_display}")
+                
+                # Truncate response display
+                response_display = current_state.response[:100] + "..." if len(current_state.response) > 100 else current_state.response
+                print(f"Response: {response_display}")
+                
                 if current_state.tags:
                     print(f"Tags: {', '.join(current_state.tags)}")
     
@@ -224,8 +234,8 @@ class InteractiveTreeBrowser:
         else:
             tree_prefix = prefix + ("└── " if is_last else "├── ")
         
-        # Format state display
-        message_preview = state.message[:40] + "..." if len(state.message) > 40 else state.message
+        # Format state display with truncated message
+        message_preview = state.message[:35] + "..." if len(state.message) > 35 else state.message
         
         # Highlight selected state
         if is_selected:

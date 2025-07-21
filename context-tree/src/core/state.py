@@ -20,6 +20,11 @@ class ConversationState:
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     @property
+    def is_branch(self) -> bool:
+        """Check if this state represents a branch."""
+        return self.metadata.get('is_branch', False)
+
+    @property
     def display_name(self) -> str:
         """Get display name combining sequence and hierarchical ID."""
         return f"{self.sequence_id} ({self.hierarchical_id})"

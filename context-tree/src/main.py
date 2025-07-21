@@ -171,8 +171,9 @@ class OllamaTreeChatApp:
             )
             
             # Show branch creation info if applicable
-            if not state.is_root and len(self.tree.get_children(state.parent_id)) > 1:
-                siblings = self.tree.get_siblings(state.hierarchical_id)
+            if state.is_branch:  # Now uses the property
+                parent_children = self.tree.get_children(state.parent_id) if state.parent_id else []
+                siblings = [s for s in parent_children if s.hierarchical_id != state.hierarchical_id]
                 branch_number = len(siblings) + 1
                 self.display.print_info(f"Created branch {state.display_name} (Branch {branch_number}) from {state.parent_id}")
                 if siblings:
@@ -267,11 +268,11 @@ class OllamaTreeChatApp:
         
         while True:
             try:
-                # Show current context in prompt
+                # Show current context with enhanced styling
                 if self.tree.current_state_id:
                     current_state = self.tree.current_state
                     if current_state:
-                        branch_indicator = " 🌿" if not current_state.is_root else ""
+                        branch_indicator = " 🌿" if current_state.is_branch else ""  # Use property
                         prompt = f"\n[{current_state.display_name}{branch_indicator}] You: "
                     else:
                         prompt = "\n[unknown] You: "

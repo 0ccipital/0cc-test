@@ -71,8 +71,8 @@ class TreeRenderer:
             for tag in list(state.tags)[:3]:  # Show max 3 tags
                 text.append(f"[{tag}]", style="yellow")
         
-        # Branch indicator
-        if state.hierarchical_id != state.sequence_id:  # It's a branch
+        # Branch indicator - use the property
+        if state.is_branch:
             text.append(" 🌿", style="yellow")
         
         return text
