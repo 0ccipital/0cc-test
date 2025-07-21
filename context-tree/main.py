@@ -1,255 +1,37 @@
-import requests
-import json
-import time
-from datetime import datetime
-from typing import Dict, List, Optional, Any, Tuple
+"""Main CLI interface for Ollama Context Tree Chat."""
+
 import os
 import sys
-import shutil
 import signal
 import readline
 import atexit
+from pathlib import Path
+from datetime import datetime
 
-class OllamaContextTree:
-    def __init__(self, base_url: str = "http://localhost:11434"):
-        self.base_url = base_url
-        self.states: Dict[str, Dict] = {}
-        self.current_state_id: Optional[str] = None
-        self.global_counter = 0
-        
-    def _generate_state_id(self, parent_id: Optional[str] = None) -> str:
-        """Generate a state ID that reflects tree structure"""
-        self.global_counter += 1
-        
-        if parent_id is None:
-            return f"state_{self.global_counter}"
-        
-        parent_state = self.states.get(parent_id)
-        if parent_state:
-            existing_children = len(parent_state["children"])
-            if existing_children == 0:
-                return f"state_{self.global_counter}"
-            else:
-                branch_letter = chr(ord('a') + existing_children - 1)
-                return f"state_{self.global_counter}_{branch_letter}"
-        
-        return f"state_{self.global_counter}"
-    
-    def _unload_model(self, model: str) -> bool:
-        """Completely unload model from memory to clear all context"""
-        try:
-            response = requests.post(
-                f"{self.base_url}/api/chat",
-                json={
-                    "model": model,
-                    "messages": [],
-                    "keep_alive": 0
-                }
-            )
-            return response.status_code == 200
-        except Exception as e:
-            return False
-    
-    def get_available_models(self) -> List[str]:
-        """Get list of available models from Ollama"""
-        try:
-            response = requests.get(f"{self.base_url}/api/tags")
-            if response.status_code == 200:
-                models_data = response.json()
-                return [model["name"] for model in models_data.get("models", [])]
-            else:
-                return []
-        except Exception as e:
-            return []
-    
-    def chat_and_save_state(self, 
-                           message: str, 
-                           model: str = "llama3.2",
-                           parent_state_id: Optional[str] = None,
-                           system_message: Optional[str] = None) -> str:
-        """Send a chat message and save the resulting state"""
-        
-        messages = []
-        
-        if system_message:
-            messages.append({"role": "system", "content": system_message})
-        
-        if parent_state_id and parent_state_id in self.states:
-            parent_messages = self.states[parent_state_id]["messages"]
-            messages.extend(parent_messages)
-        
-        messages.append({"role": "user", "content": message})
-        
-        try:
-            response = requests.post(
-                f"{self.base_url}/api/chat",
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "stream": False
-                }
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                assistant_message = result["message"]["content"]
-                
-                complete_messages = messages + [{"role": "assistant", "content": assistant_message}]
-                
-                state_id = self._generate_state_id(parent_state_id)
-                
-                depth = 0
-                if parent_state_id:
-                    depth = self.states[parent_state_id]["depth"] + 1
-                
-                is_branch = False
-                branch_info = None
-                if parent_state_id and parent_state_id in self.states:
-                    parent_children = self.states[parent_state_id]["children"]
-                    if len(parent_children) > 0:
-                        is_branch = True
-                        branch_info = {
-                            "branched_from": parent_state_id,
-                            "branch_number": len(parent_children) + 1,
-                            "sibling_states": parent_children.copy()
-                        }
-                
-                self.states[state_id] = {
-                    "id": state_id,
-                    "parent_id": parent_state_id,
-                    "messages": complete_messages,
-                    "last_user_message": message,
-                    "last_assistant_message": assistant_message,
-                    "model": model,
-                    "timestamp": datetime.now().isoformat(),
-                    "children": [],
-                    "depth": depth,
-                    "is_branch": is_branch,
-                    "branch_info": branch_info,
-                    "creation_order": self.global_counter
-                }
-                
-                if parent_state_id and parent_state_id in self.states:
-                    self.states[parent_state_id]["children"].append(state_id)
-                
-                self.current_state_id = state_id
-                return state_id
-                
-            else:
-                raise Exception(f"Ollama API error: {response.status_code} - {response.text}")
-                
-        except Exception as e:
-            raise Exception(f"Failed to chat with Ollama: {e}")
-    
-    def revert_to_state(self, state_id: str) -> bool:
-        """Revert to a previous state"""
-        if state_id not in self.states:
-            return False
-        
-        model = self.states[state_id]["model"]
-        if self._unload_model(model):
-            self.current_state_id = state_id
-            return True
-        return False
-    
-    def get_path_to_state(self, state_id: str) -> List[str]:
-        """Get the path from root to a specific state"""
-        if state_id not in self.states:
-            return []
-        
-        path = []
-        current = state_id
-        while current:
-            path.insert(0, current)
-            current = self.states[current]["parent_id"]
-        return path
-    
-    def print_conversation_tree(self, state_id: str = None, indent: int = 0, is_last_child: bool = True, prefix: str = ""):
-        """Print a visual representation of the conversation tree with proper branching"""
-        if state_id is None:
-            roots = [s for s in self.states.values() if s["parent_id"] is None]
-            if not roots:
-                print("No conversation states yet.")
-                return
-            for i, root in enumerate(roots):
-                is_last = i == len(roots) - 1
-                self.print_conversation_tree(root["id"], 0, is_last, "")
-            return
-        
-        if state_id not in self.states:
-            return
-            
-        state = self.states[state_id]
-        
-        if indent == 0:
-            tree_prefix = ""
-        else:
-            tree_prefix = prefix + ("└── " if is_last_child else "├── ")
-        
-        user_msg = state["last_user_message"][:45] + "..." if len(state["last_user_message"]) > 45 else state["last_user_message"]
-        
-        current_marker = " ← CURRENT" if state_id == self.current_state_id else ""
-        branch_marker = " 🌿" if state["is_branch"] else ""
-        
-        timestamp = datetime.fromisoformat(state["timestamp"]).strftime("%H:%M:%S")
-        
-        print(f"{tree_prefix}{state['id']}: {user_msg}{branch_marker}{current_marker}")
-        
-        children = state["children"]
-        for i, child_id in enumerate(children):
-            is_last = i == len(children) - 1
-            if indent == 0:
-                child_prefix = ""
-            else:
-                child_prefix = prefix + ("    " if is_last_child else "│   ")
-            self.print_conversation_tree(child_id, indent + 1, is_last, child_prefix)
-
-class Colors:
-    """ANSI color codes for terminal output"""
-    RESET = '\033[0m'
-    BOLD = '\033[1m'
-    DIM = '\033[2m'
-    
-    # Colors
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    MAGENTA = '\033[95m'
-    CYAN = '\033[96m'
-    WHITE = '\033[97m'
-    GRAY = '\033[90m'
-    
-    # Background colors
-    BG_RED = '\033[101m'
-    BG_GREEN = '\033[102m'
-    BG_YELLOW = '\033[103m'
-    BG_BLUE = '\033[104m'
+from tree import ContextTree
+from ollama import OllamaClient
+from display import TreeDisplay, Colors
+import tags
+import config
 
 class OllamaChatCLI:
     def __init__(self):
-        self.tree = OllamaContextTree()
+        self.tree = ContextTree()
+        self.ollama = OllamaClient()
+        self.display = TreeDisplay()
         self.current_model = None
         self.system_message = None
-        self.terminal_width = self._get_terminal_width()
         self.setup_readline()
         self.setup_signal_handlers()
         
-    def _get_terminal_width(self) -> int:
-        """Get terminal width, default to 80 if can't determine"""
-        try:
-            return shutil.get_terminal_size().columns
-        except:
-            return 80
-    
     def setup_readline(self):
-        """Setup readline for better input handling"""
+        """Setup readline for better input handling."""
         try:
             # Enable tab completion
             readline.parse_and_bind("tab: complete")
             
             # Set up history
-            history_file = os.path.expanduser("~/.ollama_chat_history")
+            history_file = config.HISTORY_FILE
             try:
                 readline.read_history_file(history_file)
             except FileNotFoundError:
@@ -265,7 +47,7 @@ class OllamaChatCLI:
             pass  # readline not available
     
     def setup_signal_handlers(self):
-        """Setup signal handlers for graceful exit"""
+        """Setup signal handlers for graceful exit."""
         def signal_handler(sig, frame):
             print(f"\n\n{Colors.YELLOW}👋 Goodbye!{Colors.RESET}")
             sys.exit(0)
@@ -273,64 +55,45 @@ class OllamaChatCLI:
         signal.signal(signal.SIGINT, signal_handler)
     
     def clear_screen(self):
-        """Clear the terminal screen"""
+        """Clear the terminal screen."""
         os.system('clear')
     
-    def print_separator(self, char="═", color=Colors.BLUE):
-        """Print a separator line"""
-        print(f"{color}{char * self.terminal_width}{Colors.RESET}")
-    
     def print_header(self):
-        """Print the CLI header with enhanced styling"""
-        self.print_separator("═", Colors.CYAN)
+        """Print the CLI header with current state info."""
         title = "🌳 OLLAMA CONTEXT TREE CHAT"
-        padding = (self.terminal_width - len(title)) // 2
+        self.display.print_separator("═", Colors.CYAN)
+        padding = (self.display.terminal_width - len(title)) // 2
         print(f"{Colors.CYAN}{Colors.BOLD}{' ' * padding}{title}{Colors.RESET}")
-        self.print_separator("═", Colors.CYAN)
+        self.display.print_separator("═", Colors.CYAN)
         
         if self.current_model:
             print(f"{Colors.GREEN}📦 Model:{Colors.RESET} {Colors.BOLD}{self.current_model}{Colors.RESET}")
             
             if self.tree.current_state_id:
-                current_state = self.tree.states[self.tree.current_state_id]
+                current_state = self.tree.get_current_state()
                 branch_info = ""
-                if current_state["is_branch"]:
+                if current_state and current_state.get("is_branch", False):
                     branch_info = f" {Colors.YELLOW}🌿 [BRANCH]{Colors.RESET}"
                 
                 print(f"{Colors.BLUE}📍 Current State:{Colors.RESET} {Colors.BOLD}{self.tree.current_state_id}{Colors.RESET}{branch_info}")
                 
                 # Show path to current state
-                path = self.tree.get_path_to_state(self.tree.current_state_id)
-                if len(path) > 1:
-                    path_display = f" {Colors.GRAY}→{Colors.RESET} ".join(path)
-                    print(f"{Colors.GRAY}🛤️  Path:{Colors.RESET} {path_display}")
+                if current_state:
+                    path = self.tree.get_path_to_state(self.tree.current_state_id)
+                    if len(path) > 1:
+                        path_display = f" {Colors.GRAY}→{Colors.RESET} ".join(path)
+                        print(f"{Colors.GRAY}🛤️  Path:{Colors.RESET} {path_display}")
         
-        self.print_separator("─", Colors.GRAY)
+        self.display.print_separator("─", Colors.GRAY)
         print()
     
-    def print_error(self, message: str):
-        """Print an error message with styling"""
-        print(f"{Colors.RED}❌ {message}{Colors.RESET}")
-    
-    def print_success(self, message: str):
-        """Print a success message with styling"""
-        print(f"{Colors.GREEN}✅ {message}{Colors.RESET}")
-    
-    def print_info(self, message: str):
-        """Print an info message with styling"""
-        print(f"{Colors.BLUE}💡 {message}{Colors.RESET}")
-    
-    def print_warning(self, message: str):
-        """Print a warning message with styling"""
-        print(f"{Colors.YELLOW}⚠️  {message}{Colors.RESET}")
-    
     def select_model(self) -> bool:
-        """Let user select a model from available models"""
+        """Let user select a model from available models."""
         print(f"{Colors.CYAN}Fetching available models...{Colors.RESET}")
-        models = self.tree.get_available_models()
+        models = self.ollama.get_available_models()
         
         if not models:
-            self.print_error("No models found. Make sure Ollama is running and has models installed.")
+            self.display.show_error("No models found. Make sure Ollama is running and has models installed.")
             return False
         
         print(f"\n{Colors.BOLD}📋 Available Models:{Colors.RESET}")
@@ -348,17 +111,17 @@ class OllamaChatCLI:
                 choice_num = int(choice)
                 if 1 <= choice_num <= len(models):
                     self.current_model = models[choice_num - 1]
-                    self.print_success(f"Selected model: {self.current_model}")
+                    self.display.show_success(f"Selected model: {self.current_model}")
                     return True
                 else:
-                    self.print_error(f"Please enter a number between 1 and {len(models)}")
+                    self.display.show_error(f"Please enter a number between 1 and {len(models)}")
             except ValueError:
-                self.print_error("Please enter a valid number or 'q' to quit")
+                self.display.show_error("Please enter a valid number or 'q' to quit")
             except (EOFError, KeyboardInterrupt):
                 return False
     
     def set_system_message(self):
-        """Allow user to set a system message"""
+        """Allow user to set a system message."""
         print(f"\n{Colors.BOLD}🔧 System Message Setup{Colors.RESET}")
         print("Enter a system message (or press Enter to skip):")
         
@@ -367,102 +130,223 @@ class OllamaChatCLI:
             if system_msg:
                 self.system_message = system_msg
                 preview = system_msg[:50] + "..." if len(system_msg) > 50 else system_msg
-                self.print_success(f"System message set: {preview}")
+                self.display.show_success(f"System message set: {preview}")
             else:
                 self.system_message = None
-                self.print_info("No system message set")
+                self.display.show_info("No system message set")
         except (EOFError, KeyboardInterrupt):
             self.system_message = None
             print()
     
     def show_states(self):
-        """Display all conversation states with enhanced formatting"""
+        """Display all conversation states."""
         if not self.tree.states:
             print(f"{Colors.GRAY}📭 No conversation states yet.{Colors.RESET}")
             return
         
         print(f"\n{Colors.BOLD}🌳 Conversation Tree:{Colors.RESET}")
-        self.print_separator("─", Colors.GRAY)
-        self.tree.print_conversation_tree()
-        self.print_separator("─", Colors.GRAY)
+        self.display.print_separator("─", Colors.GRAY)
+        tree_display = self.display.render_tree(self.tree.states, self.tree.current_state_id)
+        print(tree_display)
+        self.display.print_separator("─", Colors.GRAY)
         
-        print(f"\n{Colors.BOLD}📊 State Details:{Colors.RESET}")
+        # Show state summary
+        print(f"\n{Colors.BOLD}📊 State Summary:{Colors.RESET}")
         sorted_states = sorted(self.tree.states.items(), key=lambda x: x[1]["creation_order"])
         
         for state_id, state in sorted_states:
-            timestamp = datetime.fromisoformat(state["timestamp"]).strftime("%H:%M:%S")
             current_marker = f" {Colors.GREEN}← CURRENT{Colors.RESET}" if state_id == self.tree.current_state_id else ""
-            branch_marker = f" {Colors.YELLOW}🌿{Colors.RESET}" if state["is_branch"] else ""
-            
-            message_preview = state['last_user_message'][:40] + "..." if len(state['last_user_message']) > 40 else state['last_user_message']
-            
-            print(f"  {Colors.CYAN}{state_id}:{Colors.RESET} {message_preview} {Colors.GRAY}[{timestamp}]{Colors.RESET}{branch_marker}{current_marker}")
+            state_line = self.display.render_state_line(state)
+            print(f"  {state_line}{current_marker}")
     
-    def select_state_to_revert(self) -> bool:
-        """Let user select a state to revert to with enhanced UX"""
+    def handle_revert(self) -> bool:
+        """Handle revert command with enhanced interface."""
         if not self.tree.states:
-            self.print_error("No states available to revert to.")
+            self.display.show_error("No states available to revert to.")
             return False
         
-        self.show_states()
+        # Get branch points for smart selection
+        branch_points = self.tree.get_branch_points()
+        
+        if not branch_points:
+            self.display.show_info("No branch points found. Showing all states.")
+            # Show all states if no branch points
+            all_states = list(self.tree.states.values())
+            all_states.sort(key=lambda x: x['creation_order'])
+            branch_points = all_states
         
         print(f"\n{Colors.BOLD}🔄 Revert to Previous State{Colors.RESET}")
-        print(f"Current state: {Colors.CYAN}{self.tree.current_state_id}{Colors.RESET}")
-        print("Available states to revert to:")
+        if self.tree.current_state_id:
+            print(f"Current state: {Colors.CYAN}{self.tree.current_state_id}{Colors.RESET}")
         
-        sorted_states = sorted(self.tree.states.items(), key=lambda x: x[1]["creation_order"])
+        # Use display method for selection
+        selected_state_id = self.display.prompt_for_revert_choice(branch_points)
         
-        for i, (state_id, state) in enumerate(sorted_states, 1):
-            branch_marker = f" {Colors.YELLOW}🌿{Colors.RESET}" if state["is_branch"] else ""
-            current_marker = f" {Colors.GREEN}← CURRENT{Colors.RESET}" if state_id == self.tree.current_state_id else ""
-            message_preview = state['last_user_message'][:35] + "..." if len(state['last_user_message']) > 35 else state['last_user_message']
+        if not selected_state_id:
+            return False
+        
+        if selected_state_id == self.tree.current_state_id:
+            self.display.show_warning("You're already at that state!")
+            return False
+        
+        print(f"{Colors.CYAN}🔄 Reverting to {selected_state_id}...{Colors.RESET}")
+        
+        # Unload model for clean context
+        if self.current_model:
+            self.ollama.unload_model(self.current_model)
+        
+        if self.tree.revert_to_state(selected_state_id):
+            self.display.show_success(f"Successfully reverted to {selected_state_id}")
+            self.display.show_info("Next message will create a new branch from this state")
+            return True
+        else:
+            self.display.show_error(f"Failed to revert to {selected_state_id}")
+            return False
+    
+    def handle_tag(self):
+        """Handle tagging command."""
+        if not self.tree.current_state_id:
+            self.display.show_error("No current state to tag.")
+            return
+        
+        current_state = self.tree.get_current_state()
+        if not current_state:
+            self.display.show_error("Current state not found.")
+            return
+        
+        current_tags = current_state.get('tags', [])
+        selected_tag = self.display.prompt_for_tag(current_tags)
+        
+        if selected_tag:
+            if selected_tag in current_tags:
+                # Remove tag if already present
+                tags.remove_tag(current_state, selected_tag)
+                self.display.show_success(f"Removed tag: {tags.get_tag_display(selected_tag)}")
+            else:
+                # Add tag
+                tags.assign_tag(current_state, selected_tag)
+                self.display.show_success(f"Added tag: {tags.get_tag_display(selected_tag)}")
+    
+    def handle_compare(self):
+        """Handle branch comparison."""
+        if not self.tree.current_state_id:
+            self.display.show_error("No current state for comparison.")
+            return
+        
+        siblings = self.tree.get_sibling_states(self.tree.current_state_id)
+        if not siblings:
+            self.display.show_info("No sibling branches to compare with.")
+            return
+        
+        current_state = self.tree.get_current_state()
+        
+        print(f"\n{Colors.BOLD}🔍 Compare with sibling branches:{Colors.RESET}")
+        for i, sibling_id in enumerate(siblings, 1):
+            sibling_state = self.tree.states[sibling_id]
+            state_line = self.display.render_state_line(sibling_state)
+            print(f"  {i}. {state_line}")
+        
+        try:
+            choice = input(f"\nSelect branch to compare (1-{len(siblings)}) or Enter to cancel: ").strip()
+            if not choice:
+                return
             
-            print(f"  {Colors.CYAN}{i}.{Colors.RESET} {state_id}: {message_preview}{branch_marker}{current_marker}")
+            choice_num = int(choice)
+            if 1 <= choice_num <= len(siblings):
+                sibling_id = siblings[choice_num - 1]
+                sibling_state = self.tree.states[sibling_id]
+                
+                comparison = self.display.render_comparison(current_state, sibling_state)
+                print(f"\n{comparison}")
+            else:
+                self.display.show_error(f"Please enter a number between 1 and {len(siblings)}")
+        except (ValueError, EOFError, KeyboardInterrupt):
+            return
+    
+    def handle_save(self):
+        """Handle save command."""
+        if not self.tree.states:
+            self.display.show_error("No conversation to save.")
+            return
         
-        while True:
-            try:
-                prompt = f"\n{Colors.BOLD}Select state to revert to (1-{len(sorted_states)}) or 'c' to cancel:{Colors.RESET} "
-                choice = input(prompt).strip()
+        # Generate default filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"conversation_{timestamp}.json"
+        
+        try:
+            filename = input(f"Save as [{default_name}]: ").strip()
+            if not filename:
+                filename = default_name
+            
+            # Ensure .json extension
+            if not filename.endswith('.json'):
+                filename += '.json'
+            
+            # Use save directory
+            filepath = os.path.join(config.DEFAULT_SAVE_DIR, filename)
+            
+            if self.tree.save_to_file(filepath):
+                self.display.show_success(f"Conversation saved to {filepath}")
+            else:
+                self.display.show_error("Failed to save conversation")
+        except (EOFError, KeyboardInterrupt):
+            return
+    
+    def handle_load(self):
+        """Handle load command."""
+        save_dir = Path(config.DEFAULT_SAVE_DIR)
+        if not save_dir.exists():
+            self.display.show_error("No saved conversations found.")
+            return
+        
+        # List available files
+        json_files = list(save_dir.glob("*.json"))
+        if not json_files:
+            self.display.show_error("No saved conversations found.")
+            return
+        
+        print(f"\n{Colors.BOLD}📁 Saved Conversations:{Colors.RESET}")
+        for i, filepath in enumerate(json_files, 1):
+            # Get file modification time
+            mtime = datetime.fromtimestamp(filepath.stat().st_mtime)
+            print(f"  {i}. {filepath.name} {Colors.GRAY}[{mtime.strftime('%Y-%m-%d %H:%M')}]{Colors.RESET}")
+        
+        try:
+            choice = input(f"\nSelect conversation to load (1-{len(json_files)}) or Enter to cancel: ").strip()
+            if not choice:
+                return
+            
+            choice_num = int(choice)
+            if 1 <= choice_num <= len(json_files):
+                filepath = json_files[choice_num - 1]
                 
-                if choice.lower() == 'c':
-                    return False
-                
-                choice_num = int(choice)
-                if 1 <= choice_num <= len(sorted_states):
-                    target_state_id = sorted_states[choice_num - 1][0]
-                    
-                    if target_state_id == self.tree.current_state_id:
-                        self.print_warning("You're already at that state!")
-                        continue
-                    
-                    print(f"{Colors.CYAN}🔄 Reverting to {target_state_id}...{Colors.RESET}")
-                    if self.tree.revert_to_state(target_state_id):
-                        self.print_success(f"Successfully reverted to {target_state_id}")
-                        self.print_info("Next message will create a new branch from this state")
-                        return True
-                    else:
-                        self.print_error(f"Failed to revert to {target_state_id}")
-                        return False
+                if self.tree.load_from_file(str(filepath)):
+                    self.display.show_success(f"Loaded conversation from {filepath.name}")
+                    # Update display
+                    self.clear_screen()
+                    self.print_header()
                 else:
-                    self.print_error(f"Please enter a number between 1 and {len(sorted_states)}")
-            except ValueError:
-                self.print_error("Please enter a valid number or 'c' to cancel")
-            except (EOFError, KeyboardInterrupt):
-                return False
+                    self.display.show_error("Failed to load conversation")
+            else:
+                self.display.show_error(f"Please enter a number between 1 and {len(json_files)}")
+        except (ValueError, EOFError, KeyboardInterrupt):
+            return
     
     def print_help(self):
-        """Print available commands with enhanced formatting"""
+        """Print available commands with examples."""
         print(f"\n{Colors.BOLD}📖 Available Commands:{Colors.RESET}")
         
         commands = [
             ("/help", "Show this help message"),
-            ("/states", "Show conversation tree and states"),
-            ("/revert", "Revert to a previous state"),
-            ("/model", "Change model"),
+            ("/states", "Show conversation tree and all states"),
+            ("/revert", "Revert to a previous state (smart branch selection)"),
+            ("/tag", "Tag current state (✅ good, ❌ bad, ⚡ branch-point)"),
+            ("/compare", "Compare current state with sibling branches"),
+            ("/save", "Save conversation tree to file"),
+            ("/load", "Load conversation tree from file"),
+            ("/model", "Change current model"),
             ("/system", "Set system message"),
             ("/clear", "Clear screen"),
-            ("/path", "Show path to current state"),
-            ("/info", "Show detailed current state info"),
             ("/quit, /q", "Exit the chat")
         ]
         
@@ -472,109 +356,25 @@ class OllamaChatCLI:
         print(f"\n{Colors.BOLD}💬 Chat:{Colors.RESET}")
         print("  Just type your message to chat normally!")
         
+        print(f"\n{Colors.BOLD}🏷️  Quick Tagging:{Colors.RESET}")
+        print("  After each response, you can quickly tag with:")
+        print(tags.get_tag_help())
+        
         print(f"\n{Colors.YELLOW}💡 Tip:{Colors.RESET} When you revert to a previous state and continue,")
         print("   a new branch will be created automatically!")
     
-    def show_current_path(self):
-        """Show the path to the current state with enhanced formatting"""
-        if not self.tree.current_state_id:
-            self.print_error("No current state.")
-            return
-        
-        path = self.tree.get_path_to_state(self.tree.current_state_id)
-        print(f"\n{Colors.BOLD}🛤️  Path to current state ({self.tree.current_state_id}):{Colors.RESET}")
-        
-        for i, state_id in enumerate(path):
-            state = self.tree.states[state_id]
-            indent = "  " * i
-            arrow = f" {Colors.GRAY}→{Colors.RESET} " if i < len(path) - 1 else ""
-            branch_marker = f" {Colors.YELLOW}🌿{Colors.RESET}" if state["is_branch"] else ""
-            current_marker = f" {Colors.GREEN}← CURRENT{Colors.RESET}" if state_id == self.tree.current_state_id else ""
-            
-            message_preview = state['last_user_message'][:35] + "..." if len(state['last_user_message']) > 35 else state['last_user_message']
-            
-            print(f"{indent}{Colors.CYAN}{state_id}:{Colors.RESET} {message_preview}{branch_marker}{current_marker}{arrow}")
-    
-    def show_current_state_info(self):
-        """Show detailed information about the current state"""
-        if not self.tree.current_state_id:
-            self.print_error("No current state.")
-            return
-        
-        state = self.tree.states[self.tree.current_state_id]
-        
-        print(f"\n{Colors.BOLD}📊 Current State Information:{Colors.RESET}")
-        self.print_separator("─", Colors.GRAY)
-        
-        info_items = [
-            ("State ID", state['id']),
-            ("Parent", state['parent_id'] or 'None (root)'),
-            ("Children", ', '.join(state['children']) if state['children'] else 'None'),
-            ("Depth", str(state['depth'])),
-            ("Creation Order", f"#{state['creation_order']}"),
-            ("Is Branch", 'Yes' if state['is_branch'] else 'No'),
-            ("Timestamp", state['timestamp']),
-            ("Model", state['model'])
-        ]
-        
-        for label, value in info_items:
-            print(f"{Colors.CYAN}{label}:{Colors.RESET} {value}")
-        
-        if state['branch_info']:
-            branch_info = state['branch_info']
-            print(f"{Colors.CYAN}Branch Info:{Colors.RESET}")
-            print(f"  - Branched from: {branch_info['branched_from']}")
-            print(f"  - Branch number: {branch_info['branch_number']}")
-            print(f"  - Sibling states: {', '.join(branch_info['sibling_states'])}")
-        
-        print(f"\n{Colors.BOLD}Messages:{Colors.RESET}")
-        print(f"{Colors.YELLOW}User:{Colors.RESET} {state['last_user_message']}")
-        
-        # Word wrap the assistant response
-        response = state['last_assistant_message']
-        wrapped_response = self._wrap_text(response, self.terminal_width - 4)
-        print(f"{Colors.GREEN}Assistant:{Colors.RESET} {wrapped_response}")
-    
-    def _wrap_text(self, text: str, width: int) -> str:
-        """Wrap text to specified width"""
-        words = text.split()
-        lines = []
-        current_line = []
-        current_length = 0
-        
-        for word in words:
-            if current_length + len(word) + 1 <= width:
-                current_line.append(word)
-                current_length += len(word) + 1
-            else:
-                if current_line:
-                    lines.append(' '.join(current_line))
-                current_line = [word]
-                current_length = len(word)
-        
-        if current_line:
-            lines.append(' '.join(current_line))
-        
-        return '\n           '.join(lines)  # Indent continuation lines
-    
-    def _format_assistant_response(self, response: str) -> str:
-        """Format assistant response with proper wrapping and styling"""
-        wrapped = self._wrap_text(response, self.terminal_width - 4)
-        return f"{Colors.GREEN}🤖 Assistant:{Colors.RESET} {wrapped}"
-    
     def chat_loop(self):
-        """Main chat loop with enhanced UX"""
+        """Main chat loop with enhanced UX."""
         self.print_help()
         
         while True:
             try:
                 # Show current context with enhanced styling
                 if self.tree.current_state_id:
-                    current_state = self.tree.states[self.tree.current_state_id]
+                    current_state = self.tree.get_current_state()
                     branch_indicator = ""
-                    if current_state["is_branch"]:
-                        branch_info = current_state["branch_info"]
-                        branch_indicator = f" {Colors.YELLOW}🌿{branch_info['branch_number']}{Colors.RESET}"
+                    if current_state and current_state.get("is_branch", False):
+                        branch_indicator = f" {Colors.YELLOW}🌿{Colors.RESET}"
                     
                     prompt = f"\n{Colors.BOLD}[{Colors.CYAN}{self.tree.current_state_id}{Colors.RESET}{branch_indicator}{Colors.BOLD}]{Colors.RESET} {Colors.BOLD}You:{Colors.RESET} "
                 else:
@@ -597,11 +397,21 @@ class OllamaChatCLI:
                     elif command == 'states':
                         self.show_states()
                     elif command == 'revert':
-                        reverted = self.select_state_to_revert()
+                        reverted = self.handle_revert()
                         if reverted:
-                            time.sleep(0.5)  # Brief pause for better UX
+                            # Brief pause and refresh display
+                            import time
+                            time.sleep(0.5)
                             self.clear_screen()
                             self.print_header()
+                    elif command == 'tag':
+                        self.handle_tag()
+                    elif command == 'compare':
+                        self.handle_compare()
+                    elif command == 'save':
+                        self.handle_save()
+                    elif command == 'load':
+                        self.handle_load()
                     elif command == 'model':
                         if self.select_model():
                             self.clear_screen()
@@ -611,12 +421,8 @@ class OllamaChatCLI:
                     elif command == 'clear':
                         self.clear_screen()
                         self.print_header()
-                    elif command == 'path':
-                        self.show_current_path()
-                    elif command == 'info':
-                        self.show_current_state_info()
                     else:
-                        self.print_error(f"Unknown command: {command}. Type /help for available commands.")
+                        self.display.show_error(f"Unknown command: {command}. Type /help for available commands.")
                     continue
                 
                 # Regular chat message
@@ -627,33 +433,82 @@ class OllamaChatCLI:
                     will_branch = False
                     if self.tree.current_state_id and self.tree.current_state_id in self.tree.states:
                         current_state = self.tree.states[self.tree.current_state_id]
-                        if len(current_state["children"]) > 0:
+                        if len(current_state.get("children", [])) > 0:
                             will_branch = True
                             print(f"\r{Colors.YELLOW}🌿 Creating new branch from {self.tree.current_state_id}...{Colors.RESET}")
                     else:
                         print(f"\r{' ' * 20}\r", end="")  # Clear "Thinking..." message
                     
-                    state_id = self.tree.chat_and_save_state(
-                        user_input,
+                    # Build message history
+                    messages = []
+                    if self.system_message and not self.tree.current_state_id:
+                        messages.append({"role": "system", "content": self.system_message})
+                    
+                    # Get conversation history up to current state
+                    if self.tree.current_state_id:
+                        conversation_messages = self.tree.get_conversation_messages(self.tree.current_state_id)
+                        messages.extend(conversation_messages)
+                    
+                    # Add new user message
+                    messages.append({"role": "user", "content": user_input})
+                    
+                    # Send to Ollama
+                    response = self.ollama.chat(messages, self.current_model)
+                    
+                    # Create new state
+                    state_id = self.tree.create_state(
+                        message=user_input,
+                        response=response,
                         model=self.current_model,
-                        parent_state_id=self.tree.current_state_id,
-                        system_message=self.system_message if not self.tree.current_state_id else None
+                        parent_id=self.tree.current_state_id
                     )
                     
-                    response = self.tree.states[state_id]["last_assistant_message"]
-                    print(self._format_assistant_response(response))
+                    # Display response
+                    wrapped_response = self._wrap_text(response, self.display.terminal_width - 4)
+                    print(f"{Colors.GREEN}🤖 Assistant:{Colors.RESET} {wrapped_response}")
                     
                     # Show branch creation info
                     new_state = self.tree.states[state_id]
-                    if new_state["is_branch"]:
-                        branch_info = new_state["branch_info"]
-                        print(f"\n{Colors.YELLOW}🌿 Created branch {Colors.CYAN}{state_id}{Colors.RESET} {Colors.YELLOW}(Branch {branch_info['branch_number']}) from {Colors.CYAN}{branch_info['branched_from']}{Colors.RESET}")
-                        if branch_info['sibling_states']:
-                            siblings = ', '.join([f"{Colors.CYAN}{s}{Colors.RESET}" for s in branch_info['sibling_states']])
-                            print(f"   {Colors.GRAY}Sibling branches: {siblings}{Colors.RESET}")
+                    if new_state.get("is_branch", False):
+                        parent_id = new_state["parent_id"]
+                        parent_children = self.tree.get_children(parent_id)
+                        branch_number = len(parent_children)
+                        print(f"\n{Colors.YELLOW}🌿 Created branch {Colors.CYAN}{state_id}{Colors.RESET} {Colors.YELLOW}(Branch {branch_number}) from {Colors.CYAN}{parent_id}{Colors.RESET}")
+                        
+                        # Show sibling branches
+                        siblings = [child for child in parent_children if child != state_id]
+                        if siblings:
+                            sibling_display = ', '.join([f"{Colors.CYAN}{s}{Colors.RESET}" for s in siblings])
+                            print(f"   {Colors.GRAY}Sibling branches: {sibling_display}{Colors.RESET}")
+                    
+                    # Quick tagging prompt
+                    if config.QUICK_TAGGING_ENABLED:
+                        print(f"\n{Colors.DIM}Quick tag: [g]ood [b]ranch-point [x]bad [Enter]skip{Colors.RESET}", end=" ")
+                        try:
+                            # Set a short timeout for quick tagging
+                            import select
+                            import sys
+                            
+                            if select.select([sys.stdin], [], [], 2.0)[0]:  # 2 second timeout
+                                quick_tag = sys.stdin.readline().strip().lower()
+                                if quick_tag:
+                                    tag_name = tags.parse_quick_tag(quick_tag)
+                                    if tag_name:
+                                        tags.assign_tag(new_state, tag_name)
+                                        tag_display = tags.get_tag_display(tag_name)
+                                        print(f"\r{Colors.GREEN}✅ Tagged: {tag_display}{Colors.RESET}")
+                                    else:
+                                        print(f"\r{Colors.GRAY}Skipped tagging{Colors.RESET}")
+                                else:
+                                    print(f"\r{Colors.GRAY}Skipped tagging{Colors.RESET}")
+                            else:
+                                print(f"\r{Colors.GRAY}Skipped tagging{Colors.RESET}")
+                        except:
+                            # Fallback if select doesn't work (Windows)
+                            print(f"\r{Colors.GRAY}Skipped tagging{Colors.RESET}")
                     
                 except Exception as e:
-                        print(f"\r{Colors.RED}❌ Error: {e}{Colors.RESET}")
+                    print(f"\r{Colors.RED}❌ Error: {e}{Colors.RESET}")
                     
             except KeyboardInterrupt:
                 print(f"\n\n{Colors.YELLOW}👋 Goodbye!{Colors.RESET}")
@@ -662,8 +517,30 @@ class OllamaChatCLI:
                 print(f"\n\n{Colors.YELLOW}👋 Goodbye!{Colors.RESET}")
                 break
     
+    def _wrap_text(self, text: str, width: int) -> str:
+        """Wrap text to specified width."""
+        words = text.split()
+        lines = []
+        current_line = []
+        current_length = 0
+        
+        for word in words:
+            if current_length + len(word) + 1 <= width:
+                current_line.append(word)
+                current_length += len(word) + 1
+            else:
+                if current_line:
+                    lines.append(' '.join(current_line))
+                current_line = [word]
+                current_length = len(word)
+        
+        if current_line:
+            lines.append(' '.join(current_line))
+        
+        return '\n           '.join(lines)  # Indent continuation lines
+    
     def run(self):
-        """Main entry point with enhanced startup experience"""
+        """Main entry point with enhanced startup experience."""
         self.clear_screen()
         self.print_header()
         
@@ -673,14 +550,8 @@ class OllamaChatCLI:
         print()
         
         # Check if Ollama is running
-        try:
-            models = self.tree.get_available_models()
-            if not models:
-                self.print_error("Cannot connect to Ollama or no models found.")
-                print("Please make sure Ollama is running with: ollama serve")
-                return
-        except:
-            self.print_error("Cannot connect to Ollama.")
+        if not self.ollama.is_connected():
+            self.display.show_error("Cannot connect to Ollama.")
             print("Please make sure Ollama is running with: ollama serve")
             return
         
@@ -692,13 +563,14 @@ class OllamaChatCLI:
         self.set_system_message()
         
         # Start chat
+        import time
         time.sleep(0.5)  # Brief pause for better UX
         self.clear_screen()
         self.print_header()
         self.chat_loop()
 
 def main():
-    """Entry point with enhanced error handling"""
+    """Entry point with enhanced error handling."""
     try:
         # Check if we're in a compatible terminal
         if os.getenv('TERM_PROGRAM') == 'iTerm.app':
