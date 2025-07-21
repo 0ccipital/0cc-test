@@ -1,9 +1,32 @@
 [project]
 name = "context-tree"
-version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.13"
-dependencies = [
-    "requests>=2.32.4",
+version = "0.2.0"
+description = "Professional CLI tool for branching conversations with Ollama models"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
 ]
+dependencies = [
+    "requests>=2.31.0",
+    "rich>=13.0.0",
+]
+requires-python = ">=3.8"
+readme = "README.md"
+license = {text = "Unlicense"}
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+octree = "src.main:main"
