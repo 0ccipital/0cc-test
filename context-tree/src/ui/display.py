@@ -18,23 +18,20 @@ class StreamingDisplay:
         self.renderer = TreeRenderer()
     
     def stream_response(self, response_generator: Generator[str, None, str], prefix: str = "🤖 Assistant: ") -> str:
-        """Display streaming response with live updates."""
-        response_text = Text()
-        response_text.append(prefix, style="bright_green bold")
+        """Display streaming response with Rich formatting but scrollable."""
+        # Use console.print for the prefix with styling
+        self.console.print()  # Add some space
+        self.console.print("🤖 Assistant: ", style="bright_green bold", end="")
         
         complete_response = ""
         
-        with Live(Panel(response_text, title="Response", border_style="green"), console=self.console, refresh_per_second=10) as live:
-            for chunk in response_generator:
-                complete_response += chunk
-                
-                # Update display
-                current_text = Text()
-                current_text.append(prefix, style="bright_green bold")
-                current_text.append(complete_response, style="white")
-                
-                live.update(Panel(current_text, title="Response", border_style="green"))
+        # Stream chunks directly without Live wrapper
+        for chunk in response_generator:
+            complete_response += chunk
+            # Use regular print for streaming content to allow scrolling
+            print(chunk, end="", flush=True)
         
+        print()  # Newline at end
         return complete_response
     
     def show_thinking(self, message: str = "Thinking") -> Live:
